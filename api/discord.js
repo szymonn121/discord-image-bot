@@ -23,32 +23,32 @@ async function searchImages(query) {
   }
 
   const data = await response.json();
-
   return data.images ?? [];
 }
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      error: "Method Not Allowed"
+export default async function handler(request) {
+  if (request.method !== "POST") {
+    return new Response("Method Not Allowed", {
+      status: 405
     });
   }
 
-  const signature = req.headers["x-signature-ed25519"];
-  const timestamp = req.headers["x-signature-timestamp"];
+  // Discord wymaga ORYGINALNEGO body do weryfikacji podpisu.
+  const rawBody = await request.text();
+
+  const signature =
+    request.headers.get("x-signature-ed25519");
+
+  const timestamp =
+    request.headers.get("x-signature-timestamp");
 
   if (!signature || !timestamp) {
-    return res.status(401).json({
-      error: "Missing Discord signature"
+    return new Response("Missing Discord signature", {
+      status: 401
     });
   }
 
-  const rawBody =
-    typeof req.body === "string"
-      ? req.body
-      : JSON.stringify(req.body);
-
-  const isValid = verifyKey(
+  const isValid = await verifyKey(
     rawBody,
     signature,
     timestamp,
@@ -56,21 +56,29 @@ export default async function handler(req, res) {
   );
 
   if (!isValid) {
-    return res.status(401).json({
-      error: "Invalid request signature"
+    return new Response("Invalid request signature", {
+      status: 401
     });
   }
 
-  const interaction = req.body;
+  let interaction;
 
-  // Discord Ping
+  try {
+    interaction = JSON.parse(rawBody);
+  } catch {
+    return new Response("Invalid JSON", {
+      status: 400
+    });
+  }
+
+  // Discord Ping podczas ustawiania Endpoint URL
   if (interaction.type === 1) {
-    return res.status(200).json({
+    return Response.json({
       type: 1
     });
   }
 
-  // Slash command
+  // /img
   if (
     interaction.type === 2 &&
     interaction.data?.name === "img"
@@ -80,7 +88,7 @@ export default async function handler(req, res) {
     )?.value;
 
     if (!query) {
-      return res.status(200).json({
+      return Response.json({
         type: 4,
         data: {
           content: "Podaj frazę do wyszukania."
@@ -88,77 +96,99 @@ export default async function handler(req, res) {
       });
     }
 
-    // Natychmiast odpowiadamy Discordowi,
-    // żeby nie przekroczyć limitu czasu interakcji.
-    res.status(200).json({
-      type: 5,
-      data: {
-        flags: 64
-      }
+    // Natychmiastowe potwierdzenie interakcji.
+    // Discord wymaga odpowiedzi w ciągu 3 sekund.
+    const response = Response.json({
+      type: 5
     });
 
-    try {
-      const images = await searchImages(query);
+    // Praca może być wykonana po wysłaniu odpowiedzi.
+    processImageSearch(
+      interaction.application_id,
+      interaction.token,
+      query
+    ).catch(error => {
+      console.error("Image search error:", error);
+    });
 
-      if (!images.length) {
-        await editOriginalResponse(
-          interaction.application_id,
-          interaction.token,
-          {
-            content: `Nie znalazłem zdjęć dla **${query}**.`,
-            embeds: []
-          }
-        );
+    return response;
+  }
 
-        return;
-      }
+  return Response.json({
+    type: 4,
+    data: {
+      content: "Nieznana komenda."
+    }
+  });
+}
 
-      const image = images[0];
+async function processImageSearch(
+  applicationId,
+  interactionToken,
+  query
+) {
+  try {
+    const images = await searchImages(query);
 
-      const embed = {
-        color: 0x5865f2,
-        title: `Wynik: ${query}`,
-        image: {
-          url: image.imageUrl
-        },
-        url: image.link,
-        description: image.source
-          ? `Źródło: **${image.source}**`
-          : undefined,
-        footer: {
-          text: "Google Images • Serper"
-        },
-        timestamp: new Date().toISOString()
-      };
-
+    if (!images.length) {
       await editOriginalResponse(
-        interaction.application_id,
-        interaction.token,
+        applicationId,
+        interactionToken,
         {
-          content: "",
-          embeds: [embed]
-        }
-      );
-    } catch (error) {
-      console.error(error);
-
-      await editOriginalResponse(
-        interaction.application_id,
-        interaction.token,
-        {
-          content:
-            "Wystąpił błąd podczas wyszukiwania zdjęcia. Sprawdź konfigurację Serper API.",
+          content: `Nie znalazłem zdjęć dla **${query}**.`,
           embeds: []
         }
       );
+
+      return;
     }
 
-    return;
-  }
+    const image = images[0];
 
-  return res.status(400).json({
-    error: "Unknown interaction"
-  });
+    const embed = {
+      color: 0x5865f2,
+      title: `Wynik: ${query}`,
+      url: image.link,
+      image: {
+        url: image.imageUrl
+      },
+      description: image.source
+        ? `Źródło: **${image.source}**`
+        : undefined,
+      footer: {
+        text: "Google Images • Serper"
+      },
+      timestamp: new Date().toISOString()
+    };
+
+    await editOriginalResponse(
+      applicationId,
+      interactionToken,
+      {
+        content: "",
+        embeds: [embed]
+      }
+    );
+  } catch (error) {
+    console.error(error);
+
+    try {
+      await editOriginalResponse(
+        applicationId,
+        interactionToken,
+        {
+          content:
+            "Wystąpił błąd podczas wyszukiwania zdjęcia.",
+          embeds: []
+        }
+      );
+    } catch (discordError) {
+      console.error(
+        "Discord response error:",
+        discordError
+      );
+    }
+  }
 }
 
 async function editOriginalResponse(
