@@ -27,9 +27,24 @@ async function searchImages(query) {
 }
 
 export default async function handler(request) {
+  if (request.method === "GET") {
+    return new Response("OK", {
+      status: 200
+    });
+  }
+
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", {
       status: 405
+    });
+  }
+
+  const publicKey = process.env.DISCORD_PUBLIC_KEY;
+
+  if (!publicKey) {
+    console.error("Missing DISCORD_PUBLIC_KEY environment variable.");
+    return new Response("Discord public key is not configured", {
+      status: 500
     });
   }
 
@@ -52,7 +67,7 @@ export default async function handler(request) {
     rawBody,
     signature,
     timestamp,
-    process.env.DISCORD_PUBLIC_KEY
+    publicKey
   );
 
   if (!isValid) {
